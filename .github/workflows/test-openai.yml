@@ -1,0 +1,82 @@
+name: Test OpenAI LLM and Embeddings
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-openai:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Verify configured APIs with synthetic papers
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_BASE: ${{ secrets.OPENAI_API_BASE }}
+          CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
+        run: |
+          set -euo pipefail
+          printf '%b\n' "$CUSTOM_CONFIG" > config/custom.yaml
+          uv run python - <<'PY'
+          from omegaconf import OmegaConf
+          from openai import OpenAI
+          from zotero_arxiv_daily.protocol import Paper
+          from zotero_arxiv_daily.reranker.api import ApiReranker
+
+          config = OmegaConf.merge(
+              OmegaConf.load("config/base.yaml"),
+              OmegaConf.load("config/custom.yaml"),
+          )
+
+          assert config.executor.reranker == "api", "Set executor.reranker: api"
+          assert config.reranker.api.model == "text-embedding-3-small"
+          assert config.llm.api_mode == "response", "Set llm.api_mode: response"
+          assert config.llm.generation_kwargs.model == "gpt-6-luna"
+          assert config.llm.api.base_url == "https://api.openai.com/v1"
+          assert config.reranker.api.base_url == "https://api.openai.com/v1"
+
+          # 1: Test the project's actual API reranker code.
+          similarity = ApiReranker(config).get_similarity_score(
+              ["We use squeezed light for photonic quantum computation."],
+              [
+                  "Quantum optical circuits process squeezed quantum states.",
+                  "Ocean temperatures affect regional climate patterns.",
+              ],
+          )
+          assert similarity.shape == (1, 2)
+          print("EMBEDDING TEST PASSED")
+          print("Model: text-embedding-3-small")
+          print("Similarity matrix shape:", similarity.shape)
+
+          # 2: Test the project's actual TL;DR generation code.
+          client = OpenAI(
+              api_key=config.llm.api.key,
+              base_url=config.llm.api.base_url,
+              timeout=90.0,
+              max_retries=0,
+          )
+          paper = Paper(
+              source="arxiv",
+              title="Squeezed Light for Photonic Quantum Computing",
+              authors=["Example Researcher"],
+              abstract=(
+                  "We study squeezed optical states as a resource "
+                  "for quantum information processing and analyze "
+                  "their role in continuous-variable photonic circuits."
+              ),
+              url="https://example.org/test-paper",
+          )
+          tldr = paper._generate_tldr_with_llm(client, config.llm)
+          assert isinstance(tldr, str) and tldr.strip(), "Empty LLM output"
+          print("LLM TEST PASSED")
+          print("Model: gpt-6-luna")
+          print("Generated TLDR:", tldr.strip())
+          print("ALL OPENAI TESTS PASSED")
+          PY
